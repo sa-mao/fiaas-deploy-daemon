@@ -18,7 +18,7 @@ import mock
 import pytest
 from k8s.models.common import ObjectMeta
 from k8s.models.ingress import Ingress, IngressTLS
-from mock import create_autospec
+from mock import create_autospec, Mock
 from requests import Response
 
 from fiaas_deploy_daemon.config import Configuration, HostRewriteRule
@@ -494,20 +494,27 @@ class TestIngressDeployer(object):
         config.ingress_suffixes = ["svc.test.example.com", "127.0.0.1.xip.io"]
         config.host_rewrite_rules = [
             HostRewriteRule("rewrite.example.com=test.rewrite.example.com"),
-            HostRewriteRule(r"([a-z0-9](?:[-a-z0-9]*[a-z0-9])?).rewrite.example.com=test.\1.rewrite.example.com")
+            HostRewriteRule(r"([a-z0-9](?:[-a-z0-9]*[a-z0-9])?).rewrite.example.com=test.\1.rewrite.example.com"),
+            HostRewriteRule(r"([\w\.\-]+)\.svc.test.example.com=dont-rewrite-suffix-urls.example.com"),
+            HostRewriteRule(r"([\w\.\-]+)\.127.0.0.1.xip.io=dont-rewrite-suffix-urls.example.com"),
         ]
         config.tls_certificate_issuer_type_default = DEFAULT_TLS_ISSUER
         config.tls_certificate_issuer_type_overrides = {}
         return config
 
     @pytest.fixture
-    def deployer(self, config, ingress_tls, owner_references):
-        return IngressDeployer(config, ingress_tls, owner_references)
+    def deployer(self, config, ingress_tls, owner_references, default_app_spec):
+        return IngressDeployer(config, ingress_tls, owner_references, default_app_spec)
 
     @pytest.fixture
-    def deployer_no_suffix(self, config, ingress_tls, owner_references):
+    def deployer_no_suffix(self, config, ingress_tls, owner_references, default_app_spec):
         config.ingress_suffixes = []
-        return IngressDeployer(config, ingress_tls, owner_references)
+        return IngressDeployer(config, ingress_tls, owner_references, default_app_spec)
+
+    @pytest.fixture
+    def default_app_spec(self):
+        default_app_spec = Mock(return_value=app_spec())
+        return default_app_spec
 
     def pytest_generate_tests(self, metafunc):
         fixtures = ("app_spec", "expected_ingress")
@@ -537,6 +544,8 @@ class TestIngressDeployer(object):
     @pytest.mark.usefixtures("dtparse", "get")
     def test_multiple_ingresses(self, post, delete, deployer, app_spec):
         app_spec.annotations.ingress.update(ANNOTATIONS.copy())
+
+        del app_spec.ingresses[:]  # make sure the default ingress will be re-created
         app_spec.ingresses.append(IngressItemSpec(host="extra.example.com",
                                                   pathmappings=[IngressPathMappingSpec(path="/", port=8000)],
                                                   annotations={"some/annotation": "some-value"}))
@@ -633,13 +642,13 @@ class TestIngressDeployer(object):
             ingress_tls.apply.assert_called_once_with(TypeMatcher(Ingress), app_spec, hosts, DEFAULT_TLS_ISSUER, use_suffixes=True)
 
     @pytest.fixture
-    def deployer_issuer_overrides(self, config, ingress_tls, owner_references):
+    def deployer_issuer_overrides(self, config, ingress_tls, owner_references, default_app_spec):
         config.tls_certificate_issuer_type_overrides = {
             "foo.example.com": "certmanager.k8s.io/issuer",
             "bar.example.com": "certmanager.k8s.io/cluster-issuer",
             "foo.bar.example.com": "certmanager.k8s.io/issuer"
         }
-        return IngressDeployer(config, ingress_tls, owner_references)
+        return IngressDeployer(config, ingress_tls, owner_references, default_app_spec)
 
     @pytest.mark.usefixtures("delete")
     def test_applies_ingress_tls_issuser_overrides(self, post, deployer_issuer_overrides, ingress_tls, app_spec):

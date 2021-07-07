@@ -30,6 +30,7 @@ GENERIC_REQ = [
     "PyYAML == 5.1.2",
     "pyaml == 19.4.1",
     "pinject == 0.14.1",
+    "decorator < 5.0.0",  # 5.0.0 and later drops py2 support (transitive dep from pinject)
     "six == 1.12.0",
     "dnspython == 1.16.0",
     "k8s == 0.17.0",
@@ -51,10 +52,10 @@ DEPLOY_REQ = [
 ]
 
 FLAKE8_REQ = [
-    'flake8-print == 3.1.0',
+    'flake8-print == 3.1.4',
     'flake8-comprehensions == 1.4.1',
-    'pep8-naming == 0.8.2',
-    'flake8 == 3.7.8'
+    'pep8-naming == 0.11.1',
+    'flake8 == 3.9.0'
 ]
 
 TESTS_REQ = [
@@ -72,6 +73,7 @@ TESTS_REQ = [
 
 DEV_TOOLS = [
     "tox==3.14.5",
+    "virtualenv==20.4.2"
 ]
 
 

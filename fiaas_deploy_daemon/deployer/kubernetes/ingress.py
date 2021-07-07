@@ -27,7 +27,7 @@ from k8s.models.common import ObjectMeta
 from k8s.models.ingress import Ingress, IngressSpec, IngressRule, HTTPIngressRuleValue, HTTPIngressPath, IngressBackend, \
     IngressTLS
 
-from fiaas_deploy_daemon.specs.models import IngressItemSpec
+from fiaas_deploy_daemon.specs.models import IngressItemSpec, IngressPathMappingSpec
 from fiaas_deploy_daemon.retry import retry_on_upsert_conflict
 from fiaas_deploy_daemon.tools import merge_dicts
 from collections import namedtuple
@@ -36,7 +36,8 @@ LOG = logging.getLogger(__name__)
 
 
 class IngressDeployer(object):
-    def __init__(self, config, ingress_tls, owner_references):
+    def __init__(self, config, ingress_tls, owner_references, default_app_spec):
+        self._default_app_spec = default_app_spec
         self._ingress_suffixes = config.ingress_suffixes
         self._host_rewrite_rules = config.host_rewrite_rules
         self._ingress_tls = ingress_tls
@@ -77,8 +78,26 @@ class IngressDeployer(object):
     def _expand_default_hosts(self, app_spec):
         all_pathmappings = list(_deduplicate_in_order(chain.from_iterable(ingress_item.pathmappings
                                                       for ingress_item in app_spec.ingresses if not ingress_item.annotations)))
+
+        if not all_pathmappings:
+            # no pathmappings were found, build the default ingress
+            http_port = self._resolve_http_port(app_spec)
+            default_path = self._resolve_default_path()
+            all_pathmappings = [IngressPathMappingSpec(path=default_path, port=http_port)]
+
         return [IngressItemSpec(host=host, pathmappings=all_pathmappings, annotations=None)
                 for host in self._generate_default_hosts(app_spec.name)]
+
+    @staticmethod
+    def _resolve_http_port(app_spec):
+        try:
+            return next(portspec.port for portspec in app_spec.ports if portspec.name == "http")
+        except StopIteration:
+            raise ValueError("Cannot find http port mapping in application spec")
+
+    def _resolve_default_path(self):
+        default_ingress_item = next(ingress_item for ingress_item in self._default_app_spec().ingresses)
+        return next(pathmapping.path for pathmapping in default_ingress_item.pathmappings)
 
     def _get_issuer_type(self, host):
         for (suffix, issuer_type) in self._tls_issuer_type_overrides:
@@ -92,11 +111,14 @@ class IngressDeployer(object):
         are separated
         '''
         explicit_host = _has_explicitly_set_host(app_spec.ingresses)
-        ingress_items = app_spec.ingresses + self._expand_default_hosts(app_spec)
+        ingress_items = [item._replace(host=self._apply_host_rewrite_rules(item.host)) for item in app_spec.ingresses if item.host]
+        ingress_items += self._expand_default_hosts(app_spec)
 
-        AnnotatedIngress = namedtuple("AnnotatedIngress", ["name", "ingress_items", "annotations", "explicit_host", "issuer_type"])
+        AnnotatedIngress = namedtuple("AnnotatedIngress", ["name", "ingress_items", "annotations", "explicit_host",
+                                      "issuer_type", "default"])
         default_ingress = AnnotatedIngress(name=app_spec.name, ingress_items=[], annotations={},
-                                           explicit_host=explicit_host, issuer_type=self._tls_issuer_type_default)
+                                           explicit_host=explicit_host, issuer_type=self._tls_issuer_type_default,
+                                           default=True)
         ingresses = [default_ingress]
         override_issuer_ingresses = {}
         for ingress_item in ingress_items:
@@ -105,7 +127,8 @@ class IngressDeployer(object):
             if ingress_item.annotations:
                 annotated_ingresses = AnnotatedIngress(name=next_name, ingress_items=[ingress_item],
                                                        annotations=ingress_item.annotations,
-                                                       explicit_host=True, issuer_type=issuer_type)
+                                                       explicit_host=True, issuer_type=issuer_type,
+                                                       default=False)
                 ingresses.append(annotated_ingresses)
             elif issuer_type != self._tls_issuer_type_default:
                 annotated_ingress = override_issuer_ingresses.setdefault(issuer_type,
@@ -113,7 +136,8 @@ class IngressDeployer(object):
                                                                                           ingress_items=[],
                                                                                           annotations={},
                                                                                           explicit_host=explicit_host,
-                                                                                          issuer_type=issuer_type))
+                                                                                          issuer_type=issuer_type,
+                                                                                          default=False))
                 annotated_ingress.ingress_items.append(ingress_item)
             else:
                 default_ingress.ingress_items.append(ingress_item)
@@ -133,15 +157,15 @@ class IngressDeployer(object):
                               annotations=annotations)
 
         per_host_ingress_rules = [
-            IngressRule(host=self._apply_host_rewrite_rules(ingress_item.host),
+            IngressRule(host=ingress_item.host,
                         http=self._make_http_ingress_rule_value(app_spec, ingress_item.pathmappings))
             for ingress_item in annotated_ingress.ingress_items
             if ingress_item.host is not None
         ]
-        if annotated_ingress.annotations:
-            use_suffixes = False
-        else:
+        if annotated_ingress.default:
             use_suffixes = True
+        else:
+            use_suffixes = False
 
         ingress_spec = IngressSpec(rules=per_host_ingress_rules)
 
